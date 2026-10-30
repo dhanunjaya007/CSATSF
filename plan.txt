@@ -1,0 +1,69 @@
+You are building and tuning ONE component: C-SATSF (Cascaded Spatial-Aware Texture-Salient Filtering, Algorithm 2 of the SCC-Loc paper). Do NOT build the full pipeline. No DINOv2 retrieval, no CD-RAPS. The goal is a filter that turns raw MINIMA-RoMa matches for a single (thermal query, satellite tile) pair into a clean inlier set AND a reliable accept/reject decision. A wrong accepted match costs far more than a rejected one, so false accepts must be near zero.
+
+PROJECT LAYOUT
+The working folder contains `dataset/` (Thermal-UAV from Hugging Face, FloralHercules/Thermal-UAV). Expected contents:
+- dataset/Reference_map/changsha/ref.tif (satellite ortho, ~0.26 m/px, geo-referenced)
+- dataset/Reference_map/changsha/dsm.tif (optional, not needed for this task)
+- dataset/metadata/{train,valid,test}_Thermal.json (per image: lat, lon, altitude, pitch/yaw/roll, focal length, sensor size, image size)
+- thermal image files
+First inspect the folder, print the actual structure and the metadata schema, and verify field units before writing code. If something differs from the above, adapt and tell me.
+
+Create this structure:
+  csatsf/
+    config.yaml          # all thresholds
+    data/                # pair builder
+    matcher/             # MINIMA-RoMa wrapper + cache
+    filters/             # one file per stage
+    eval/                # metrics, ablations, threshold sweeps
+    cache/               # cached raw matches (npz)
+    reports/
+
+STEP 1: PAIR BUILDER
+- Open ref.tif with rasterio. Convert each query's lat/lon to reference pixel coordinates (reproject if the CRS is not what lat/lon needs).
+- Compute query GSD = altitude / f_px, where f_px = focal_len * image_width / sensor_width. Check the units against the sample record, and sanity-check that the result is near the 0.26 m/px reference scale.
+- Cut tiles from ref.tif sized to the query footprint, resampled to the query GSD so both images share scale.
+- Generate three pair types per query, with a fixed seed:
+  * POSITIVE: tile containing the true footprint, with a random centre offset (0 to ~30 m).
+  * HARD NEGATIVE: tiles a few hundred metres to ~2 km away, preferring visually similar areas (rank candidates by cheap similarity such as ORB/histogram or grayscale correlation of downsampled tiles, and take the most similar non-overlapping ones).
+  * EASY NEGATIVE: random far tiles.
+- Also generate augmented variants of each positive to mimic the competition sensor: downsample the query to 320x256, add blur and noise, and apply random rotation (yaw), plus scale changes simulating altitudes of 100 to 3000 m.
+- Split by flight or sequence (no leakage between tune and test): use train for tuning and valid/test for final evaluation.
+- Store ground truth per positive pair: the similarity or homography mapping query pixels to tile pixels, computed from the GPS, yaw and GSD. Save pair metadata as JSON/parquet.
+
+STEP 2: MATCHER AND CACHE
+- Wrap MINIMA-RoMa (thermal/IR-to-optical weights). Run it once per pair and save to cache/: keypoints in query, keypoints in tile, confidences, the image sizes and the pair ID.
+- Make the cache resumable. Everything after this step must run from cache, with no GPU needed.
+
+STEP 3: IMPLEMENT THE FILTER STAGES (each switchable, each with unit tests)
+a. Spatial equalization: G x G grid (default G=8). Per-cell quota Q = min(Qbase + floor(log2(c+1)), Qmax), Qmax = 3*Qbase, Qbase=3, where c is the number of matches in the cell. Keep the top-Q by confidence per cell.
+b. Texture saliency: local variance V on each image, normalised to [0,1]. Threshold = gamma * mean(V), gamma=0.5. Keep matches where both the query and tile points pass.
+c. Delaunay topology: triangulate query keypoints (scipy.spatial.Delaunay). Compute rho = area_tile / area_query per triangle, delta = |rho - median(rho)| / median(rho). Per point, the negative-vote rate is the fraction of incident triangles with delta > eps_topo (0.4). Drop points with rate > 0.5. Handle degenerate cases (fewer than 4 points, collinear points) by returning the input unchanged and flagging the pair.
+d. Global consistency: relative to the centroid, phi_i = angle(v_tile) - angle(v_query), wrapped to [-180, 180]. Keep matches with |phi - median(phi)| < eps_ang (20 deg) and scale ratio within eps_scale (0.3) of the median scale ratio.
+Run order a -> b -> c -> d. Record the count after each stage.
+
+STEP 4: DECISION FEATURES AND ACCEPT/REJECT GATE
+For every pair compute post-filter features:
+- n_inliers, spatial coverage (convex hull area / image area), grid-cell occupancy, mean confidence
+- RANSAC similarity (and homography) fit: inlier ratio, median reprojection residual
+- rotation and scale implied by the fit, and their consistency with the metadata (yaw, GSD)
+- stage survival ratios (n after each stage / raw n)
+Train a simple, interpretable gate: first hand-set thresholds, then logistic regression or a small decision tree on the tuning split. Report both. The gate outputs ACCEPT or REJECT.
+
+STEP 5: EVALUATION
+Match level (positives only): using GT, label each raw match as inlier if its reprojection error is under a pixel threshold (e.g. 5 px, also report 3 and 10). Report precision and recall of the raw set versus the filtered set.
+Decision level (all pairs): ROC and PR curves for the gate, and the operating point where the false accept rate on negatives is lowest while still accepting a reasonable share of positives. Report the false-accept rate separately on hard negatives. Also report the accepted-positive localization error (centre error in metres from the fit).
+Scoring proxy: for each accepted pair use the competition rule: +10 if error is within 1 sigma, +6 within 2 sigma, +3 within 4 sigma, 0 within 8 sigma, -20 beyond 8 sigma, 0 for reject, with sigma = sqrt(8^2 + (3*GSD)^2) metres. Report the average points per pair at each threshold and choose the gate threshold that maximizes it.
+Ablations: remove each stage individually and report the change in match precision, false-accept rate and score proxy. Test robustness across the simulated altitudes.
+
+STEP 6: TUNING
+- Tune on the tuning split only, with Optuna or a grid search over G, Qbase, gamma, eps_topo, the vote threshold, eps_ang, eps_scale and the gate thresholds.
+- Objective: maximize the score proxy, subject to a hard cap on the hard-negative false-accept rate (say at most 1%).
+- Give the final numbers on the held-out split once. Do not re-tune on it.
+- Save the best parameters to config.yaml and write reports/summary.md with tables, plots (stage-wise counts, ROC, score vs threshold), and a list of the failure cases (accepted wrong matches) with their images saved for visual inspection.
+
+CONSTRAINTS
+- Python, numpy, scipy, opencv, scikit-learn, rasterio, torch only where the matcher needs it.
+- Deterministic: seed everything.
+- The filter code must be a clean function: filter_matches(kpts_q, kpts_t, conf, img_q, img_t, config) -> (inlier_idx, features). No GT access inside it, so it can be dropped into a full pipeline later.
+- Keep the filter fast (target well under 0.1 s per pair on CPU).
+- Print the dataset structure and ask me before proceeding if the metadata fields or image format are unclear.

@@ -1,0 +1,104 @@
+seed: 42
+paths:
+  ref_tif: Data/Reference_map/changsha/ref.tif
+  metadata_dir: Data/metadata
+  thermal_root: Data/Thermal-UAV
+  checkpoint_dir: Data/NUDT/checkpoint
+  cache_dir: csatsf/cache
+  reports_dir: csatsf/reports
+reference:
+  crs: EPSG:32649
+  gsd: 0.3
+camera:
+  focal_len_mm: 12.0
+  sensor_width_mm: 9.83
+  image_width: 1280
+  image_height: 1024
+pair_builder:
+  positive:
+    center_offset_m: 30.0
+  hard_negative:
+    count: 3
+    min_distance_m: 200.0
+    max_distance_m: 2000.0
+    similarity_candidates: 20
+  easy_negative:
+    count: 2
+    min_distance_m: 3000.0
+  augmentation:
+    target_width: 320
+    target_height: 256
+    blur_kernel_range:
+    - 3
+    - 7
+    noise_std_range:
+    - 0.0
+    - 15.0
+    yaw_range:
+    - -180
+    - 180
+    altitude_range:
+    - 100
+    - 3000
+    augmented_per_positive: 3
+matcher:
+  name: minima_roma
+  checkpoint: Data/NUDT/checkpoint/MINIMA/minima_roma.pth
+  roma_checkpoint: Data/NUDT/checkpoint/RoMa/roma_outdoor.pth
+  dinov2_checkpoint: Data/NUDT/checkpoint/RoMa/dinov2_vitl14_pretrain.pth
+  image_size:
+  - 560
+  - 560
+  max_matches: 5000
+  confidence_threshold: 0.0
+filters:
+  spatial_equalization:
+    enabled: true
+    grid_size: 14
+    q_base: 5
+    q_max_multiplier: 3
+  texture_saliency:
+    enabled: true
+    gamma: 0.27314931048923746
+    kernel_size: 11
+  delaunay_topology:
+    enabled: true
+    eps_topo: 0.18972799667708012
+    vote_threshold: 0.40097416704604677
+    min_points: 4
+  global_consistency:
+    enabled: true
+    eps_ang: 10.525026201035567
+    eps_scale: 0.6424973185797089
+decision_gate:
+  min_inliers: 17
+  min_coverage: 0.05
+  min_grid_occupancy: 0.1
+  min_mean_confidence: 0.2
+  min_ransac_inlier_ratio: 0.1581371139693066
+  max_reprojection_residual: 15.0
+  use_learned_gate: true
+evaluation:
+  pixel_thresholds:
+  - 3
+  - 5
+  - 10
+  scoring:
+    base_sigma_m: 8.0
+    gsd_multiplier: 3.0
+    score_bands:
+    - max_sigma: 1
+      score: 10
+    - max_sigma: 2
+      score: 6
+    - max_sigma: 4
+      score: 3
+    - max_sigma: 8
+      score: 0
+    reject_score: 0
+    beyond_8sigma_penalty: -20
+tuning:
+  method: optuna
+  n_trials: 100
+  hard_neg_far_cap: 0.01
+  objective: score_proxy

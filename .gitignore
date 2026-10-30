@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments
+env/
+venv/
+.venv/
+
+# Large Datasets & Model Weights
+Data/
+Reference_map/
+Thermal-UAV/
+metadata/
+*.tif
+*.tiff
+*.pth
+*.ckpt
+*.tar
+*.gz
+
+# Third-party cloned submodule
+MINIMA/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
