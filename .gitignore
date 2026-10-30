@@ -12,11 +12,11 @@ env/
 venv/
 .venv/
 
-# Large Datasets & Model Weights
-Data/
-Reference_map/
-Thermal-UAV/
-metadata/
+# Large Datasets & Model Weights (at project root)
+/Data/
+/Reference_map/
+/Thermal-UAV/
+/metadata/
 *.tif
 *.tiff
 *.pth
